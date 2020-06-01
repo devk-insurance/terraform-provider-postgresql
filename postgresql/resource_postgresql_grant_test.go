@@ -39,6 +39,15 @@ func TestCreateGrantQuery(t *testing.T) {
 		},
 		{
 			resource: schema.TestResourceDataRaw(t, resourcePostgreSQLGrant().Schema, map[string]interface{}{
+				"object_type": "function",
+				"schema":      databaseName,
+				"role":        roleName,
+			}),
+			privileges: []string{"EXECUTE"},
+			expected:   fmt.Sprintf("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %s TO %s", pq.QuoteIdentifier(databaseName), pq.QuoteIdentifier(roleName)),
+		},
+		{
+			resource: schema.TestResourceDataRaw(t, resourcePostgreSQLGrant().Schema, map[string]interface{}{
 				"object_type":       "TABLE",
 				"schema":            databaseName,
 				"role":              roleName,
@@ -64,6 +73,15 @@ func TestCreateGrantQuery(t *testing.T) {
 			}),
 			privileges: []string{"CREATE", "CONNECT"},
 			expected:   fmt.Sprintf("GRANT CREATE,CONNECT ON DATABASE %s TO %s", pq.QuoteIdentifier(databaseName), pq.QuoteIdentifier(roleName)),
+		},
+		{
+			resource: schema.TestResourceDataRaw(t, resourcePostgreSQLGrant().Schema, map[string]interface{}{
+				"object_type": "role",
+				"database":    databaseName,
+				"role":        roleName,
+			}),
+			privileges: []string{"FOO1", "FOO2"},
+			expected:   fmt.Sprintf("GRANT FOO1,FOO2 TO %s", pq.QuoteIdentifier(roleName)),
 		},
 		{
 			resource: schema.TestResourceDataRaw(t, resourcePostgreSQLGrant().Schema, map[string]interface{}{
@@ -108,6 +126,14 @@ func TestCreateRevokeQuery(t *testing.T) {
 				"role":        roleName,
 			}),
 			expected: fmt.Sprintf("REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %s FROM %s", pq.QuoteIdentifier(databaseName), pq.QuoteIdentifier(roleName)),
+		},
+		{
+			resource: schema.TestResourceDataRaw(t, resourcePostgreSQLGrant().Schema, map[string]interface{}{
+				"object_type": "function",
+				"schema":      databaseName,
+				"role":        roleName,
+			}),
+			expected: fmt.Sprintf("REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA %s FROM %s", pq.QuoteIdentifier(databaseName), pq.QuoteIdentifier(roleName)),
 		},
 		{
 			resource: schema.TestResourceDataRaw(t, resourcePostgreSQLGrant().Schema, map[string]interface{}{

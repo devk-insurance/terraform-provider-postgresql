@@ -318,6 +318,12 @@ func resourcePostgreSQLRoleDelete(d *schema.ResourceData, meta interface{}) erro
 	roleName := d.Get(roleNameAttr).(string)
 
 	queries := make([]string, 0, 3)
+	// check if connected user is a superuser
+	// is the user not a superuser (like on AWS RDS) to delete the role current user has to be member of deleted role
+	superuser, err := c.isSuperuser()
+	if err == nil && !superuser {
+		queries = append(queries, fmt.Sprintf("GRANT %s TO CURRENT_USER", pq.QuoteIdentifier(roleName)))
+	}
 	if !d.Get(roleSkipReassignOwnedAttr).(bool) {
 		if c.featureSupported(featureReassignOwnedCurrentUser) {
 			queries = append(queries, fmt.Sprintf("REASSIGN OWNED BY %s TO CURRENT_USER", pq.QuoteIdentifier(roleName)))

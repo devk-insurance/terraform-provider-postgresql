@@ -18,11 +18,14 @@ var allowedObjectTypes = []string{
 	"database",
 	"table",
 	"sequence",
+	"function",
+	"role",
 }
 
 var objectTypes = map[string]string{
 	"table":    "r",
 	"sequence": "S",
+	"function": "f",
 }
 
 func resourcePostgreSQLGrant() *schema.Resource {
@@ -219,16 +222,32 @@ JOIN pg_roles ON grantee = pg_roles.oid WHERE rolname = $2
 }
 
 func readRolePrivileges(txn *sql.Tx, d *schema.ResourceData) error {
-	if d.Get("object_type").(string) == "database" {
+	var query string
+	object_type := strings.ToUpper(d.Get("object_type").(string))
+	log.Printf("[DEBUG] Type:%s ", object_type)
+	switch object_type {
+	case "DATABASE":
 		return readDatabaseRolePriviges(txn, d)
-	}
+	case "FUNCTION":
+		query = `
+SELECT pg_proc.proname, array_remove(array_agg(privilege_type), NULL)
+FROM pg_proc
+JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace
+LEFT JOIN (
+    select acls.*
+    from (
+             SELECT proname, prokind, pronamespace, (aclexplode(proacl)).* FROM pg_proc
+         ) acls
+    JOIN pg_roles on grantee = pg_roles.oid
+    WHERE rolname = $1
+) privs
+USING (proname, pronamespace, prokind)
+      WHERE nspname = $2 AND prokind = $3
+GROUP BY pg_proc.proname
+`
 
-	// This returns, for the specified role (rolname),
-	// the list of all object of the specified type (relkind) in the specified schema (namespace)
-	// with the list of the currently applied privileges (aggregation of privilege_type)
-	//
-	// Our goal is to check that every object has the same privileges as saved in the state.
-	query := `
+	default:
+		query = `
 SELECT pg_class.relname, array_remove(array_agg(privilege_type), NULL)
 FROM pg_class
 JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace
@@ -241,9 +260,15 @@ LEFT JOIN (
 ) privs
 USING (relname, relnamespace, relkind)
 WHERE nspname = $2 AND relkind = $3
-GROUP BY pg_class.relname;
+GROUP BY pg_class.relname
 `
+	}
 
+	// This returns, for the specified role (rolname),
+	// the list of all object of the specified type (relkind) in the specified schema (namespace)
+	// with the list of the currently applied privileges (aggregation of privilege_type)
+	//
+	// Our goal is to check that every object has the same privileges as saved in the state.
 	objectType := d.Get("object_type").(string)
 	rows, err := txn.Query(
 		query, d.Get("role"), d.Get("schema"), objectTypes[objectType],
@@ -288,7 +313,7 @@ func createGrantQuery(d *schema.ResourceData, privileges []string) string {
 			pq.QuoteIdentifier(d.Get("database").(string)),
 			pq.QuoteIdentifier(d.Get("role").(string)),
 		)
-	case "TABLE", "SEQUENCE":
+	case "TABLE", "SEQUENCE", "FUNCTION":
 		query = fmt.Sprintf(
 			"GRANT %s ON ALL %sS IN SCHEMA %s TO %s",
 			strings.Join(privileges, ","),
@@ -296,10 +321,21 @@ func createGrantQuery(d *schema.ResourceData, privileges []string) string {
 			pq.QuoteIdentifier(d.Get("schema").(string)),
 			pq.QuoteIdentifier(d.Get("role").(string)),
 		)
-	}
 
+	case "ROLE":
+		query = fmt.Sprintf(
+			"GRANT %s TO %s",
+			strings.Join(privileges, ","),
+			pq.QuoteIdentifier(d.Get("role").(string)),
+		)
+	}
 	if d.Get("with_grant_option").(bool) == true {
-		query = query + " WITH GRANT OPTION"
+		if strings.ToUpper(d.Get("object_type").(string)) == "ROLE" {
+			query = query + " WITH ADMIN OPTION"
+		} else {
+			query = query + " WITH GRANT OPTION"
+		}
+
 	}
 
 	return query
@@ -315,32 +351,77 @@ func createRevokeQuery(d *schema.ResourceData) string {
 			pq.QuoteIdentifier(d.Get("database").(string)),
 			pq.QuoteIdentifier(d.Get("role").(string)),
 		)
-	case "TABLE", "SEQUENCE":
+	case "TABLE", "SEQUENCE", "FUNCTION":
 		query = fmt.Sprintf(
 			"REVOKE ALL PRIVILEGES ON ALL %sS IN SCHEMA %s FROM %s",
 			strings.ToUpper(d.Get("object_type").(string)),
 			pq.QuoteIdentifier(d.Get("schema").(string)),
 			pq.QuoteIdentifier(d.Get("role").(string)),
 		)
-	}
 
+	}
 	return query
 }
 
-func grantRolePrivileges(txn *sql.Tx, d *schema.ResourceData) error {
-	privileges := []string{}
+func createRevokeRoleQuery(txn *sql.Tx, d *schema.ResourceData) string {
+	var privileges []string
+	query := ""
 	for _, priv := range d.Get("privileges").(*schema.Set).List() {
-		privileges = append(privileges, priv.(string))
+		role := priv.(string)
+		// Check the role exists
+		exists, err := roleExists(txn, role)
+		if err != nil {
+			log.Printf("[DEBUG] query role %s failed:%s", role, err.Error())
+			continue
+		}
+		if !exists {
+			log.Printf("[DEBUG] role %s does not exists", role)
+			continue
+		}
+		privileges = append(privileges, role)
 	}
-
+	if len(privileges) > 0 {
+		query = fmt.Sprintf("REVOKE %s FROM %s",
+			strings.Join(privileges, ","),
+			pq.QuoteIdentifier(d.Get("role").(string)),
+		)
+	}
+	return query
+}
+func grantRolePrivileges(txn *sql.Tx, d *schema.ResourceData) error {
+	var privileges []string
+	var object_type string
+	var role string
+	object_type = strings.ToUpper(d.Get("object_type").(string))
+	for _, priv := range d.Get("privileges").(*schema.Set).List() {
+		role = priv.(string)
+		if object_type == "role" {
+			// Check the role exists
+			exists, err := roleExists(txn, role)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				log.Printf("[DEBUG] role %s does not exists", role)
+				continue
+			}
+		}
+		privileges = append(privileges, role)
+	}
 	query := createGrantQuery(d, privileges)
-
 	_, err := txn.Exec(query)
 	return err
 }
 
 func revokeRolePrivileges(txn *sql.Tx, d *schema.ResourceData) error {
-	query := createRevokeQuery(d)
+	var query string
+	object_type := strings.ToUpper(d.Get("object_type").(string))
+	println("Revoke", object_type)
+	if object_type == "ROLE" {
+		query = createRevokeRoleQuery(txn, d)
+	} else {
+		query = createRevokeQuery(d)
+	}
 	if _, err := txn.Exec(query); err != nil {
 		return errwrap.Wrapf("could not execute revoke query: {{err}}", err)
 	}
@@ -375,8 +456,8 @@ func checkRoleDBSchemaExists(client *Client, d *schema.ResourceData) (bool, erro
 		log.Printf("[DEBUG] database %s does not exists", database)
 		return false, nil
 	}
-
-	if d.Get("object_type").(string) != "database" {
+	object_type := d.Get("object_type").(string)
+	if object_type != "database" && object_type != "role" {
 		// Connect on this database to check if schema exists
 		dbTxn, err := startTransaction(client, database)
 		if err != nil {

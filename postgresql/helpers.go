@@ -107,15 +107,21 @@ var allowedPrivileges = map[string][]string{
 	"database": []string{"ALL", "CREATE", "CONNECT", "TEMPORARY", "TEMP"},
 	"table":    []string{"ALL", "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"},
 	"sequence": []string{"ALL", "USAGE", "SELECT", "UPDATE"},
+	"function": []string{"ALL", "EXECUTE"},
+	"role":     []string{""},
 }
 
 // validatePrivileges checks that privileges to apply are allowed for this object type.
 func validatePrivileges(d *schema.ResourceData) error {
 	objectType := d.Get("object_type").(string)
 	privileges := d.Get("privileges").(*schema.Set).List()
+	if objectType == "role" {
+		//no formal check req
+		return nil
+	}
 
 	// Verify fields that are mandatory for specific object types
-	if objectType != "database" && d.Get("schema").(string) == "" {
+	if (objectType != "database") && d.Get("schema").(string) == "" {
 		return fmt.Errorf("parameter 'schema' is mandatory for object_type %s", objectType)
 	}
 
